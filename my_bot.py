@@ -5,25 +5,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 import re
 import os
 import asyncio
-from flask import Flask
+from flask import Flask, request
 import threading
-
-# --- НАЧАЛО: КОД ДЛЯ РАБОТЫ НА RENDER ---
-# Создаем простой Flask-сервер, чтобы Render знал, что бот работает
-app_flask = Flask(__name__)
-
-@app_flask.route('/')
-def home():
-    return "Бот работает!"
-
-@app_flask.route('/health')
-def health():
-    return "OK", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app_flask.run(host="0.0.0.0", port=port)
-# --- КОНЕЦ: КОД ДЛЯ RENDER ---
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,7 +15,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- ВСЯ ОСНОВНАЯ ЛОГИКА ВАШЕГО БОТА (ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ) ---
+# --- ВАША ОСНОВНАЯ ЛОГИКА БОТА (ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ) ---
 # Данные о типах заявок из предоставленной таблицы
 APPLICATION_TYPES = {
     '1': {
@@ -511,34 +494,139 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-def run_bot():
-    """Функция для запуска Telegram бота"""
+# --- НОВАЯ ЧАСТЬ: НАСТРОЙКА ВЕБХУКА ---
+
+# Создаем Flask приложение
+app = Flask(__name__)
+
+# Глобальная переменная для хранения экземпляра Application
+telegram_app = None
+
+def init_telegram_app():
+    """Инициализация Telegram приложения"""
+    global telegram_app
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token:
         logger.error("TELEGRAM_TOKEN не найден в переменных окружения")
-        return
+        return None
     
+    # Создаем приложение
     application = Application.builder().token(token).build()
     
-    # Регистрация обработчиков
+    # Регистрируем обработчики
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CallbackQueryHandler(button_handler, pattern='^(?!back_to_main$).*'))
     application.add_handler(CallbackQueryHandler(back_to_main, pattern='^back_to_main$'))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Бот запущен...")
-    application.run_polling()
+    return application
 
-# --- НАЧАЛО: ЗАПУСК БОТА И ВЕБ-СЕРВЕРА ---
-def main():
-    # Запускаем Flask в отдельном потоке
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
+@app.route('/')
+def home():
+    return "Бот работает!"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Принимает обновления от Telegram"""
+    if telegram_app is None:
+        return "Bot not initialized", 500
     
-    # Запускаем бота в основном потоке
-    run_bot()
+    try:
+        update = Update.de_json(request.get_json(), telegram_app.bot)
+        asyncio.run(telegram_app.process_update(update))
+        return 'OK', 200
+    except Exception as e:
+        logger.error(f"Error processing update: {e}")
+        return 'Error', 500
 
+@app.route('/set_webhook', methods=['GET'])
+def set_webhook():
+    """Ручная установка вебхука (можно вызвать через браузер)"""
+    try:
+        webhook_url = os.environ.get("RENDER_EXTERNAL_URL")
+        if not webhook_url:
+            return "RENDER_EXTERNAL_URL not set", 500
+        
+        full_webhook_url = f"{webhook_url}/webhook"
+        
+        if telegram_app is None:
+            return "Bot not initialized", 500
+        
+        # Устанавливаем вебхук
+        asyncio.run(telegram_app.bot.set_webhook(full_webhook_url))
+        
+        # Проверяем информацию о вебхуке
+        webhook_info = asyncio.run(telegram_app.bot.get_webhook_info())
+        
+        return f"""
+        <h1>Webhook установлен!</h1>
+        <p>URL: {webhook_info.url}</p>
+        <p>Ожидающие обновления: {webhook_info.pending_update_count}</p>
+        <p>Макс. соединений: {webhook_info.max_connections}</p>
+        """
+    except Exception as e:
+        return f"Error setting webhook: {e}", 500
+
+@app.route('/delete_webhook', methods=['GET'])
+def delete_webhook():
+    """Удаление вебхука"""
+    try:
+        if telegram_app is None:
+            return "Bot not initialized", 500
+        
+        asyncio.run(telegram_app.bot.delete_webhook())
+        return "Webhook удален!"
+    except Exception as e:
+        return f"Error deleting webhook: {e}", 500
+
+@app.route('/webhook_info', methods=['GET'])
+def webhook_info():
+    """Информация о текущем вебхуке"""
+    try:
+        if telegram_app is None:
+            return "Bot not initialized", 500
+        
+        webhook_info = asyncio.run(telegram_app.bot.get_webhook_info())
+        return f"""
+        <h1>Информация о вебхуке</h1>
+        <p>URL: {webhook_info.url}</p>
+        <p>Ожидающие обновления: {webhook_info.pending_update_count}</p>
+        <p>Последняя ошибка: {webhook_info.last_error_message}</p>
+        <p>Макс. соединений: {webhook_info.max_connections}</p>
+        """
+    except Exception as e:
+        return f"Error getting webhook info: {e}", 500
+
+# --- ЗАПУСК ---
 if __name__ == '__main__':
-    main()
-# --- КОНЕЦ: ЗАПУСК ---
+    # Инициализируем Telegram бота
+    telegram_app = init_telegram_app()
+    
+    if telegram_app is None:
+        logger.error("Не удалось инициализировать бота. Проверьте TELEGRAM_TOKEN")
+        exit(1)
+    
+    # Автоматически устанавливаем вебхук при запуске
+    webhook_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if webhook_url:
+        full_webhook_url = f"{webhook_url}/webhook"
+        try:
+            asyncio.run(telegram_app.bot.set_webhook(full_webhook_url))
+            logger.info(f"Webhook установлен на {full_webhook_url}")
+            
+            # Проверяем установку
+            webhook_info = asyncio.run(telegram_app.bot.get_webhook_info())
+            logger.info(f"Информация о вебхуке: {webhook_info.url}")
+        except Exception as e:
+            logger.error(f"Ошибка установки вебхука: {e}")
+    else:
+        logger.warning("RENDER_EXTERNAL_URL не найден, вебхук не установлен автоматически")
+    
+    # Запускаем Flask сервер (Render будет использовать этот порт)
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"Запуск Flask сервера на порту {port}")
+    app.run(host="0.0.0.0", port=port)
