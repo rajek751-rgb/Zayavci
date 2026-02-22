@@ -2,7 +2,6 @@ import logging
 import smtplib
 import os
 import sys
-import asyncio
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 # --- Состояния для ConversationHandler ---
 SELECTING_TYPE, ENTERING_DATE, ENTERING_TIME, ENTERING_DESC, ENTERING_ADDRESS, CONFIRMING = range(6)
 
-# --- Данные о типах заявок (полная структура) ---
+# --- Данные о типах заявок ---
 APPLICATION_TYPES = {
     '1': {
         'name': 'Вызов представителей и специалистов Заказчика',
@@ -164,15 +163,15 @@ APPLICATION_TYPES = {
 }
 
 # --- Настройки email ---
-SMTP_SERVER = "smtp.gmail.com"  # Для Gmail, для других почт измените
+SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-EMAIL_ADDRESS = os.environ.get("EMAIL_ADDRESS", "your-email@gmail.com")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "your-app-password")
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin-email@gmail.com")
+EMAIL_ADDRESS = os.environ.get("EMAIL_ADDRESS", "")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "")
 
 # ID для уведомлений в Telegram
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "YOUR_CHAT_ID")  # ID чата админа
-NOTIFICATION_GROUP_ID = os.environ.get("NOTIFICATION_GROUP_ID", "YOUR_GROUP_ID")  # ID группы для уведомлений
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
+NOTIFICATION_GROUP_ID = os.environ.get("NOTIFICATION_GROUP_ID", "")
 
 # --- Хранилище данных пользователей ---
 user_data_store = {}
@@ -208,11 +207,15 @@ def validate_date_time(date_str, time_str, type_id):
 
 def send_email_notification(application_data):
     """Отправка уведомления на email"""
+    if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
+        logger.warning("Email не настроен, пропускаем отправку")
+        return False
+        
     try:
         # Создаем сообщение
         msg = MIMEMultipart()
         msg['From'] = EMAIL_ADDRESS
-        msg['To'] = ADMIN_EMAIL
+        msg['To'] = ADMIN_EMAIL or EMAIL_ADDRESS
         msg['Subject'] = f"Новая заявка #{application_data.get('id', 'N/A')}"
         
         # Формируем тело письма
@@ -251,7 +254,7 @@ def send_email_notification(application_data):
         logger.error(f"Ошибка отправки email: {e}")
         return False
 
-async def send_telegram_notification(application_data):
+async def send_telegram_notification(application_data, context):
     """Отправка уведомления в Telegram"""
     try:
         # Формируем сообщение
@@ -272,22 +275,27 @@ async def send_telegram_notification(application_data):
         """
         
         # Отправляем админу
-        if ADMIN_CHAT_ID and ADMIN_CHAT_ID != "YOUR_CHAT_ID":
-            await context.bot.send_message(
-                chat_id=ADMIN_CHAT_ID,
-                text=message,
-                parse_mode='Markdown'
-            )
+        if ADMIN_CHAT_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=message,
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки админу: {e}")
         
         # Отправляем в группу
-        if NOTIFICATION_GROUP_ID and NOTIFICATION_GROUP_ID != "YOUR_GROUP_ID":
-            await context.bot.send_message(
-                chat_id=NOTIFICATION_GROUP_ID,
-                text=message,
-                parse_mode='Markdown'
-            )
+        if NOTIFICATION_GROUP_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=NOTIFICATION_GROUP_ID,
+                    text=message,
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки в группу: {e}")
         
-        logger.info(f"Telegram уведомление отправлено для заявки #{application_data.get('id')}")
         return True
     except Exception as e:
         logger.error(f"Ошибка отправки Telegram уведомления: {e}")
@@ -389,41 +397,12 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📝 Создать новую заявку", callback_data='new_application')],
         [InlineKeyboardButton("📋 Список типов заявок", callback_data='list_applications')],
-        [InlineKeyboardButton("❓ Помощь", callback_data='help')],
-        [InlineKeyboardButton("📊 Мои заявки", callback_data='my_applications')]
+        [InlineKeyboardButton("❓ Помощь", callback_data='help')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(
         '👋 Выберите действие:',
-        reply_markup=reply_markup
-    )
-
-async def my_applications(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать заявки пользователя"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    user_apps = user_data_store.get(user_id, {}).get('applications', [])
-    
-    if not user_apps:
-        text = "У вас пока нет заявок"
-    else:
-        text = "📊 *Ваши заявки:*\n\n"
-        for i, app in enumerate(user_apps[-5:], 1):  # Показываем последние 5
-            text += f"*{i}. Заявка #{app['id']}*\n"
-            text += f"📅 {app['date']} {app['time']}\n"
-            text += f"📝 {app['type_name'][:30]}...\n"
-            text += f"📍 {app['address'][:30]}...\n"
-            text += f"✅ Статус: {app.get('status', 'Принята')}\n\n"
-    
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        text,
-        parse_mode='Markdown',
         reply_markup=reply_markup
     )
 
@@ -448,7 +427,7 @@ async def new_application(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard.append(row)
             row = []
     
-    if row:  # Добавляем оставшиеся кнопки
+    if row:
         keyboard.append(row)
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')])
@@ -633,7 +612,7 @@ async def confirm_application(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # Отправляем уведомления
         send_email_notification(application_data)
-        await send_telegram_notification(application_data)
+        await send_telegram_notification(application_data, context)
         
         # Отправляем подтверждение пользователю
         await query.edit_message_text(
@@ -653,7 +632,6 @@ async def confirm_application(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Показываем главное меню
         keyboard = [
             [InlineKeyboardButton("📝 Создать новую заявку", callback_data='new_application')],
-            [InlineKeyboardButton("📋 Мои заявки", callback_data='my_applications')],
             [InlineKeyboardButton("🔙 В главное меню", callback_data='back_to_main')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -713,36 +691,47 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Основной обработчик кнопок ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на кнопки (не входящие в Conversation)"""
+    """Обработчик нажатий на кнопки"""
     query = update.callback_query
     await query.answer()
     
     if query.data == 'new_application':
-        # Запускаем создание заявки через ConversationHandler
         return await new_application(update, context)
     elif query.data == 'list_applications':
         await list_applications(update, context)
     elif query.data == 'help':
         await help_command(update, context)
-    elif query.data == 'my_applications':
-        await my_applications(update, context)
     elif query.data.startswith('select_type_'):
         return await select_type(update, context)
     
     return ConversationHandler.END
 
-# --- Настройка и запуск бота ---
-def create_application():
-    """Создает и настраивает Application"""
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текстовых сообщений"""
+    await update.message.reply_text(
+        "Я не понял команду. Используйте /start для начала работы."
+    )
+
+# --- Основная функция ---
+def main():
+    """Запуск бота"""
+    print("=" * 50)
+    print("ЗАПУСК БОТА ДЛЯ ПРИЕМА ЗАЯВОК")
+    print("=" * 50)
+    
+    # Проверяем токен
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token:
-        logger.error("TELEGRAM_TOKEN не найден в переменных окружения")
-        return None
+        print("❌ ОШИБКА: TELEGRAM_TOKEN не найден!")
+        print("Установите переменную окружения TELEGRAM_TOKEN")
+        sys.exit(1)
     
-    # Создаем Application
+    print(f"✅ Токен найден: {token[:10]}...")
+    
+    # Создаем приложение
     application = Application.builder().token(token).build()
     
-    # Создаем ConversationHandler для создания заявки
+    # Создаем ConversationHandler
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(new_application, pattern='^new_application$')],
         states={
@@ -756,61 +745,27 @@ def create_application():
             CONFIRMING: [CallbackQueryHandler(confirm_application, pattern='^(confirm_yes|confirm_no)$')],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
-        per_message=False
     )
     
     # Добавляем обработчики
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('cancel', cancel))
     application.add_handler(conv_handler)
-    application.add_handler(CallbackQueryHandler(button_handler, pattern='^(?!new_application$|select_type_|confirm_|back_to_main$).*'))
-    application.add_handler(CallbackQueryHandler(back_to_main, pattern='^back_to_main$'))
-    
-    # Добавляем обработчик для текстовых сообщений (если пользователь что-то пишет вне диалога)
+    application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    return application
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений вне диалога"""
-    await update.message.reply_text(
-        "Я не понял команду. Используйте /start для начала работы."
-    )
-
-# --- Точка входа ---
-if __name__ == '__main__':
-    print("=" * 50)
-    print("ЗАПУСК БОТА ДЛЯ ПРИЕМА ЗАЯВОК")
-    print("=" * 50)
-    
-    # Проверяем наличие токена
-    token = os.environ.get("TELEGRAM_TOKEN")
-    if not token:
-        print("❌ ОШИБКА: TELEGRAM_TOKEN не найден!")
-        print("Установите переменную окружения TELEGRAM_TOKEN")
-        sys.exit(1)
-    
-    # Проверяем настройки email (предупреждаем, но не останавливаем)
-    if not EMAIL_ADDRESS or EMAIL_ADDRESS == "your-email@gmail.com":
-        print("⚠️  ВНИМАНИЕ: EMAIL_ADDRESS не настроен, уведомления на почту работать не будут")
-    
-    # Создаем приложение бота
-    application = create_application()
-    
-    if not application:
-        print("❌ ОШИБКА: Не удалось создать приложение бота")
-        sys.exit(1)
-    
-    print("✅ Бот успешно инициализирован")
     print("🚀 Запуск бота в режиме polling...")
     print("📝 Нажмите Ctrl+C для остановки")
     print("=" * 50)
     
+    # Запускаем бота
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
     try:
-        # Запускаем бота
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        main()
     except KeyboardInterrupt:
         print("\n👋 Бот остановлен пользователем")
     except Exception as e:
-        print(f"❌ Ошибка при запуске: {e}")
+        print(f"❌ Ошибка: {e}")
         sys.exit(1)
