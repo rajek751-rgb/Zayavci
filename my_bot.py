@@ -1,771 +1,225 @@
-import logging
-import smtplib
 import os
-import sys
-from datetime import datetime, timedelta
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+import json
+from datetime import datetime
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
-logger = logging.getLogger(__name__)
 
-# --- Состояния для ConversationHandler ---
-SELECTING_TYPE, ENTERING_DATE, ENTERING_TIME, ENTERING_DESC, ENTERING_ADDRESS, CONFIRMING = range(6)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DATA_FILE = "data.json"
 
-# --- Данные о типах заявок ---
-APPLICATION_TYPES = {
-    '1': {
-        'name': 'Вызов представителей и специалистов Заказчика',
-        'submission_time': 12,
-        'confirm_time': 2,
-        'transfer1_allowed': False,
-        'transfer2_allowed': False,
-        'note': 'Допускается для переноса выезда партии по времени заявки, но не более чем на 4 часа'
-    },
-    '2': {
-        'name': 'Вызов скорой помощи для работников',
-        'submission_time': 0,
-        'confirm_time': 0,
-        'transfer1_allowed': False,
-        'transfer2_allowed': False,
-        'note': 'Круглосуточно'
-    },
-    '3': {
-        'name': 'На пожарную машину',
-        'submission_time': 0,
-        'confirm_time': 0,
-        'transfer1_allowed': False,
-        'transfer2_allowed': False,
-        'note': 'Круглосуточно'
-    },
-    '4': {
-        'name': 'На поливомоечную машину',
-        'submission_time': 24,
-        'confirm_time': 12,
-        'transfer1_allowed': False,
-        'transfer2_allowed': False,
-        'note': ''
-    },
-    '5': {
-        'name': 'На кран',
-        'submission_time': 24,
-        'confirm_time': 12,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 12 часов',
-        'note': ''
-    },
-    '6': {
-        'name': 'На погрузчик',
-        'submission_time': 24,
-        'confirm_time': 12,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 12 часов',
-        'note': ''
-    },
-    '7': {
-        'name': 'На самосвал',
-        'submission_time': 24,
-        'confirm_time': 12,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 12 часов',
-        'note': ''
-    },
-    '8': {
-        'name': 'На автосамосвал',
-        'submission_time': 24,
-        'confirm_time': 12,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 12 часов',
-        'note': ''
-    },
-    '9': {
-        'name': 'На трал',
-        'submission_time': 48,
-        'confirm_time': 24,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 24 часа',
-        'note': 'погрузка негабаритного груза'
-    },
-    '10': {
-        'name': 'На кран',
-        'submission_time': 48,
-        'confirm_time': 24,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 24 часа',
-        'note': 'монтаж'
-    },
-    '11': {
-        'name': 'На автовышку',
-        'submission_time': 24,
-        'confirm_time': 12,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 12 часов',
-        'note': ''
-    },
-    '12': {
-        'name': 'На кран',
-        'submission_time': 48,
-        'confirm_time': 24,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 24 часа',
-        'note': 'ст монтаж'
-    },
-    '13': {
-        'name': 'На поливомоечную машину',
-        'submission_time': 24,
-        'confirm_time': 12,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 12 часов',
-        'note': ''
-    },
-    '14': {
-        'name': 'На тракторную технику Заказчика',
-        'submission_time': 24,
-        'confirm_time': 12,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 12 часов',
-        'note': ''
-    },
-    '15': {
-        'name': 'На бульдозерную технику Заказчика',
-        'submission_time': 24,
-        'confirm_time': 12,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 12 часов',
-        'note': ''
-    },
-    '16': {
-        'name': 'На бульдозерную технику Заказчика',
-        'submission_time': 24,
-        'confirm_time': 12,
-        'transfer1_allowed': True,
-        'transfer2_allowed': True,
-        'transfer_note': 'за 12 часов',
-        'note': ''
-    }
-}
 
-# --- Настройки email ---
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-EMAIL_ADDRESS = os.environ.get("EMAIL_ADDRESS", "")
-EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "")
+# =======================
+# ХРАНЕНИЕ
+# =======================
 
-# ID для уведомлений в Telegram
-ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
-NOTIFICATION_GROUP_ID = os.environ.get("NOTIFICATION_GROUP_ID", "")
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {"reports": []}
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-# --- Хранилище данных пользователей ---
-user_data_store = {}
 
-# --- Вспомогательные функции ---
-def get_application_type_name(type_id):
-    """Получить название типа заявки по ID"""
-    return APPLICATION_TYPES.get(type_id, {}).get('name', 'Неизвестный тип')
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def validate_date_time(date_str, time_str, type_id):
-    """Проверка даты и времени подачи заявки"""
-    try:
-        # Парсим дату и время
-        submission_datetime = datetime.strptime(f"{date_str} {time_str}", "%d.%m.%Y %H:%M")
-        now = datetime.now()
-        
-        # Получаем требуемое время подачи для этого типа заявки
-        submission_hours = APPLICATION_TYPES.get(type_id, {}).get('submission_time', 0)
-        
-        if submission_hours == 0:
-            # Можно подавать в любое время
-            return True, None
-        
-        # Вычисляем минимальное допустимое время
-        min_allowed_time = now + timedelta(hours=submission_hours)
-        
-        if submission_datetime < min_allowed_time:
-            return False, f"Заявки этого типа принимаются минимум за {submission_hours} часов до требуемого времени"
-        
-        return True, None
-    except Exception as e:
-        return False, f"Ошибка при проверке даты: {e}"
 
-def send_email_notification(application_data):
-    """Отправка уведомления на email"""
-    if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
-        logger.warning("Email не настроен, пропускаем отправку")
-        return False
-        
-    try:
-        # Создаем сообщение
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_ADDRESS
-        msg['To'] = ADMIN_EMAIL or EMAIL_ADDRESS
-        msg['Subject'] = f"Новая заявка #{application_data.get('id', 'N/A')}"
-        
-        # Формируем тело письма
-        body = f"""
-        Новая заявка в системе
-        
-        Номер заявки: {application_data.get('id', 'N/A')}
-        Тип заявки: {application_data.get('type_name', 'N/A')}
-        
-        Дата и время: {application_data.get('date', 'N/A')} {application_data.get('time', 'N/A')}
-        Адрес/Место: {application_data.get('address', 'N/A')}
-        
-        Описание работ:
-        {application_data.get('description', 'N/A')}
-        
-        Контактные данные:
-        Пользователь: {application_data.get('user_name', 'N/A')}
-        Username: @{application_data.get('username', 'N/A')}
-        User ID: {application_data.get('user_id', 'N/A')}
-        
-        Время создания: {application_data.get('created_at', 'N/A')}
-        """
-        
-        msg.attach(MIMEText(body, 'plain', 'utf-8'))
-        
-        # Отправляем письмо
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        
-        logger.info(f"Email уведомление отправлено для заявки #{application_data.get('id')}")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка отправки email: {e}")
-        return False
+def next_number(data, brigade):
+    nums = [r["number"] for r in data["reports"] if r["brigade"] == brigade]
+    return max(nums) + 1 if nums else 1
 
-async def send_telegram_notification(application_data, context):
-    """Отправка уведомления в Telegram"""
-    try:
-        # Формируем сообщение
-        message = f"""
-📋 **НОВАЯ ЗАЯВКА** #{application_data.get('id', 'N/A')}
 
-🔹 **Тип:** {application_data.get('type_name', 'N/A')}
-🔹 **Дата/время:** {application_data.get('date', 'N/A')} {application_data.get('time', 'N/A')}
-🔹 **Адрес:** {application_data.get('address', 'N/A')}
+# =======================
+# TELEGRAM
+# =======================
 
-📝 **Описание:**
-{application_data.get('description', 'N/A')}
+app = Application.builder().token(BOT_TOKEN).build()
 
-👤 **Отправитель:** {application_data.get('user_name', 'N/A')} (@{application_data.get('username', 'N/A')})
-🆔 **User ID:** {application_data.get('user_id', 'N/A')}
 
-⏱ **Создано:** {application_data.get('created_at', 'N/A')}
-        """
-        
-        # Отправляем админу
-        if ADMIN_CHAT_ID:
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_CHAT_ID,
-                    text=message,
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logger.error(f"Ошибка отправки админу: {e}")
-        
-        # Отправляем в группу
-        if NOTIFICATION_GROUP_ID:
-            try:
-                await context.bot.send_message(
-                    chat_id=NOTIFICATION_GROUP_ID,
-                    text=message,
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logger.error(f"Ошибка отправки в группу: {e}")
-        
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка отправки Telegram уведомления: {e}")
-        return False
-
-def generate_application_id():
-    """Генерация уникального номера заявки"""
-    now = datetime.now()
-    return f"APP-{now.strftime('%Y%m%d')}-{now.strftime('%H%M%S')}"
-
-# --- Обработчики команд ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
-    keyboard = [
-        [InlineKeyboardButton("📝 Создать новую заявку", callback_data='new_application')],
-        [InlineKeyboardButton("📋 Список типов заявок", callback_data='list_applications')],
-        [InlineKeyboardButton("❓ Помощь", callback_data='help')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    # Сохраняем информацию о пользователе
-    user_id = update.effective_user.id
-    if user_id not in user_data_store:
-        user_data_store[user_id] = {
-            'name': update.effective_user.full_name,
-            'username': update.effective_user.username,
-            'applications': []
-        }
-    
+    keyboard = [[InlineKeyboardButton("📑 Новый отчёт", callback_data="new")]]
     await update.message.reply_text(
-        '👋 Добро пожаловать в бот для подачи заявок!\n\n'
-        'Выберите действие:',
-        reply_markup=reply_markup
+        "🏗 Корпоративная система ТКРС",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-async def list_applications(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать список всех типов заявок"""
-    query = update.callback_query
-    await query.answer()
-    
-    message = "📋 *Список типов заявок:*\n\n"
-    
-    for type_id, type_info in APPLICATION_TYPES.items():
-        message += f"*{type_id}.* {type_info['name']}\n"
-        message += f"   ⏱ Подача: за {type_info['submission_time']} ч\n"
-        if type_info.get('note'):
-            message += f"   📌 {type_info['note']}\n"
-        message += "\n"
-    
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        message,
-        parse_mode='Markdown',
-        reply_markup=reply_markup
-    )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать справку"""
-    query = update.callback_query
-    await query.answer()
-    
-    help_text = """
-❓ *Помощь по использованию бота*
+# =======================
+# СОЗДАНИЕ ОТЧЁТА
+# =======================
 
-*Как создать заявку:*
-1. Нажмите "Создать новую заявку"
-2. Выберите тип заявки
-3. Введите дату (ДД.ММ.ГГГГ)
-4. Введите время (ЧЧ:ММ)
-5. Опишите работы
-6. Укажите адрес/место
-7. Подтвердите заявку
+async def new_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text("Введите номер бригады:")
+    context.user_data["state"] = "brigade"
 
-*Важно:* 
-- Время подачи зависит от типа заявки
-- Некоторые заявки принимаются круглосуточно
-- Заявки можно создавать за несколько дней
 
-*Контакты поддержки:*
-@admin
-    """
-    
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        help_text,
-        parse_mode='Markdown',
-        reply_markup=reply_markup
-    )
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = context.user_data.get("state")
+    data = load_data()
 
-async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Вернуться в главное меню"""
-    query = update.callback_query
-    await query.answer()
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 Создать новую заявку", callback_data='new_application')],
-        [InlineKeyboardButton("📋 Список типов заявок", callback_data='list_applications')],
-        [InlineKeyboardButton("❓ Помощь", callback_data='help')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        '👋 Выберите действие:',
-        reply_markup=reply_markup
-    )
+    if state == "brigade":
+        context.user_data["brigade"] = update.message.text
+        await update.message.reply_text("Введите дату отчёта (ДД.ММ.ГГГГ):")
+        context.user_data["state"] = "date"
 
-# --- Обработчики создания заявки ---
-async def new_application(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начать создание новой заявки"""
-    query = update.callback_query
-    await query.answer()
-    
-    # Создаем клавиатуру с типами заявок (по 2 в ряд)
-    keyboard = []
-    row = []
-    
-    for i, (type_id, type_info) in enumerate(APPLICATION_TYPES.items(), 1):
-        button = InlineKeyboardButton(
-            f"{type_id}. {type_info['name'][:20]}", 
-            callback_data=f"select_type_{type_id}"
-        )
-        row.append(button)
-        
-        if i % 2 == 0:
-            keyboard.append(row)
-            row = []
-    
-    if row:
-        keyboard.append(row)
-    
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        "Выберите тип заявки:",
-        reply_markup=reply_markup
-    )
-    
-    return SELECTING_TYPE
+    elif state == "date":
+        context.user_data["date"] = update.message.text
+        await update.message.reply_text("Введите скважину / месторождение:")
+        context.user_data["state"] = "well"
 
-async def select_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора типа заявки"""
-    query = update.callback_query
-    await query.answer()
-    
-    type_id = query.data.replace('select_type_', '')
-    context.user_data['application_type'] = type_id
-    context.user_data['application_type_name'] = APPLICATION_TYPES[type_id]['name']
-    
-    type_info = APPLICATION_TYPES[type_id]
-    submission_time = type_info['submission_time']
-    
-    if submission_time == 0:
-        time_note = "✅ Можно подавать в любое время"
-    else:
-        time_note = f"⏱ Минимальное время подачи: за {submission_time} ч"
-    
-    await query.edit_message_text(
-        f"Вы выбрали: *{type_info['name']}*\n\n"
-        f"{time_note}\n\n"
-        f"📅 Введите дату в формате ДД.ММ.ГГГГ\n"
-        f"Например: 25.12.2024",
-        parse_mode='Markdown'
-    )
-    
-    return ENTERING_DATE
+    elif state == "well":
+        brigade = context.user_data["brigade"]
+        date = context.user_data["date"]
+        well = update.message.text
 
-async def enter_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ввода даты"""
-    date_str = update.message.text.strip()
-    
-    # Проверка формата даты
-    try:
-        datetime.strptime(date_str, "%d.%m.%Y")
-        context.user_data['application_date'] = date_str
-        
-        await update.message.reply_text(
-            f"📅 Дата: {date_str}\n\n"
-            f"⏰ Теперь введите время в формате ЧЧ:ММ\n"
-            f"Например: 14:30"
-        )
-        return ENTERING_TIME
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Неверный формат даты. Пожалуйста, введите дату в формате ДД.ММ.ГГГГ\n"
-            "Например: 25.12.2024"
-        )
-        return ENTERING_DATE
+        number = next_number(data, brigade)
+        report_id = len(data["reports"]) + 1
 
-async def enter_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ввода времени"""
-    time_str = update.message.text.strip()
-    
-    # Проверка формата времени
-    try:
-        datetime.strptime(time_str, "%H:%M")
-        
-        # Проверяем допустимость даты и времени
-        date_str = context.user_data.get('application_date')
-        type_id = context.user_data.get('application_type')
-        
-        is_valid, error_msg = validate_date_time(date_str, time_str, type_id)
-        
-        if not is_valid:
-            await update.message.reply_text(
-                f"❌ {error_msg}\n\n"
-                f"Пожалуйста, введите другую дату:"
-            )
-            return ENTERING_DATE
-        
-        context.user_data['application_time'] = time_str
-        
-        await update.message.reply_text(
-            f"📝 Введите описание работ:"
-        )
-        return ENTERING_DESC
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Неверный формат времени. Пожалуйста, введите время в формате ЧЧ:ММ\n"
-            "Например: 14:30"
-        )
-        return ENTERING_TIME
+        data["reports"].append({
+            "id": report_id,
+            "brigade": brigade,
+            "number": number,
+            "date": date,
+            "well": well,
+            "operations": []
+        })
 
-async def enter_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ввода описания"""
-    description = update.message.text.strip()
-    
-    if len(description) < 10:
-        await update.message.reply_text(
-            "❌ Описание слишком короткое. Пожалуйста, опишите работы подробнее (минимум 10 символов):"
-        )
-        return ENTERING_DESC
-    
-    context.user_data['application_description'] = description
-    
-    await update.message.reply_text(
-        f"📍 Введите адрес или место проведения работ:"
-    )
-    return ENTERING_ADDRESS
-
-async def enter_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ввода адреса"""
-    address = update.message.text.strip()
-    
-    if len(address) < 5:
-        await update.message.reply_text(
-            "❌ Адрес слишком короткий. Пожалуйста, укажите более точный адрес:"
-        )
-        return ENTERING_ADDRESS
-    
-    context.user_data['application_address'] = address
-    
-    # Показываем сводку для подтверждения
-    summary = (
-        f"📋 *Проверьте данные заявки:*\n\n"
-        f"🔹 *Тип:* {context.user_data['application_type_name']}\n"
-        f"🔹 *Дата:* {context.user_data['application_date']}\n"
-        f"🔹 *Время:* {context.user_data['application_time']}\n"
-        f"🔹 *Адрес:* {address}\n"
-        f"🔹 *Описание:* {context.user_data['application_description']}\n\n"
-        f"✅ Всё верно?"
-    )
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Да, отправить", callback_data='confirm_yes'),
-            InlineKeyboardButton("❌ Нет, заново", callback_data='confirm_no')
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        summary,
-        parse_mode='Markdown',
-        reply_markup=reply_markup
-    )
-    
-    return CONFIRMING
-
-async def confirm_application(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Подтверждение и отправка заявки"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == 'confirm_yes':
-        # Формируем данные заявки
-        user = query.from_user
-        now = datetime.now()
-        
-        application_data = {
-            'id': generate_application_id(),
-            'user_id': user.id,
-            'user_name': user.full_name,
-            'username': user.username,
-            'type_id': context.user_data['application_type'],
-            'type_name': context.user_data['application_type_name'],
-            'date': context.user_data['application_date'],
-            'time': context.user_data['application_time'],
-            'description': context.user_data['application_description'],
-            'address': context.user_data['application_address'],
-            'created_at': now.strftime("%d.%m.%Y %H:%M:%S"),
-            'status': 'Принята'
-        }
-        
-        # Сохраняем в историю пользователя
-        user_id = user.id
-        if user_id not in user_data_store:
-            user_data_store[user_id] = {'applications': []}
-        user_data_store[user_id]['applications'].append(application_data)
-        
-        # Отправляем уведомления
-        send_email_notification(application_data)
-        await send_telegram_notification(application_data, context)
-        
-        # Отправляем подтверждение пользователю
-        await query.edit_message_text(
-            f"✅ *Заявка #{application_data['id']} успешно отправлена!*\n\n"
-            f"Мы получили вашу заявку и скоро свяжемся с вами.\n\n"
-            f"📋 *Детали заявки:*\n"
-            f"🔹 Тип: {application_data['type_name']}\n"
-            f"🔹 Дата/время: {application_data['date']} {application_data['time']}\n"
-            f"🔹 Адрес: {application_data['address']}\n\n"
-            f"💾 Номер заявки сохранен, вы можете ссылаться на него при общении.",
-            parse_mode='Markdown'
-        )
-        
-        # Очищаем временные данные
+        save_data(data)
         context.user_data.clear()
-        
-        # Показываем главное меню
-        keyboard = [
-            [InlineKeyboardButton("📝 Создать новую заявку", callback_data='new_application')],
-            [InlineKeyboardButton("🔙 В главное меню", callback_data='back_to_main')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.message.reply_text(
-            "Что делаем дальше?",
-            reply_markup=reply_markup
+
+        keyboard = [[InlineKeyboardButton("📂 Открыть отчёт", callback_data=f"open_{report_id}")]]
+        await update.message.reply_text(
+            f"✅ Отчёт №{number} создан",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-    else:
-        # Отмена и возврат к выбору типа
+
+    # ================= ДОБАВЛЕНИЕ ОПЕРАЦИИ =================
+
+    elif state == "op_date":
+        context.user_data["op_date"] = update.message.text
+        await update.message.reply_text("Время начала (ЧЧ:ММ):")
+        context.user_data["state"] = "op_start"
+
+    elif state == "op_start":
+        context.user_data["op_start"] = update.message.text
+        await update.message.reply_text("Время окончания (ЧЧ:ММ):")
+        context.user_data["state"] = "op_end"
+
+    elif state == "op_end":
+        context.user_data["op_end"] = update.message.text
+        await update.message.reply_text("Название операции:")
+        context.user_data["state"] = "op_name"
+
+    elif state == "op_name":
+        context.user_data["op_name"] = update.message.text
+        await update.message.reply_text("Заявка №:")
+        context.user_data["state"] = "op_req"
+
+    elif state == "op_req":
+        context.user_data["op_req"] = update.message.text
+        await update.message.reply_text("Техника:")
+        context.user_data["state"] = "op_eq"
+
+    elif state == "op_eq":
+        context.user_data["op_eq"] = update.message.text
+        await update.message.reply_text("Представитель:")
+        context.user_data["state"] = "op_rep"
+
+    elif state == "op_rep":
+        context.user_data["op_rep"] = update.message.text
+        await update.message.reply_text("Материалы:")
+        context.user_data["state"] = "op_mat"
+
+    elif state == "op_mat":
+        report_id = context.user_data["report_id"]
+
+        for r in data["reports"]:
+            if r["id"] == report_id:
+                r["operations"].append({
+                    "date": context.user_data["op_date"],
+                    "start": context.user_data["op_start"],
+                    "end": context.user_data["op_end"],
+                    "name": context.user_data["op_name"],
+                    "request": context.user_data["op_req"],
+                    "equipment": context.user_data["op_eq"],
+                    "rep": context.user_data["op_rep"],
+                    "materials": update.message.text
+                })
+
+        save_data(data)
         context.user_data.clear()
-        
-        # Создаем клавиатуру с типами заявок
-        keyboard = []
-        row = []
-        
-        for i, (type_id, type_info) in enumerate(APPLICATION_TYPES.items(), 1):
-            button = InlineKeyboardButton(
-                f"{type_id}. {type_info['name'][:20]}", 
-                callback_data=f"select_type_{type_id}"
-            )
-            row.append(button)
-            
-            if i % 2 == 0:
-                keyboard.append(row)
-                row = []
-        
-        if row:
-            keyboard.append(row)
-        
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='back_to_main')])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            "Давайте начнем заново. Выберите тип заявки:",
-            reply_markup=reply_markup
-        )
-        
-        return SELECTING_TYPE
+        await show_report(update.message, report_id)
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отмена действия"""
-    context.user_data.clear()
-    
+
+# =======================
+# ПОКАЗ ОТЧЁТА
+# =======================
+
+async def show_report(message, report_id):
+    data = load_data()
+    report = next(r for r in data["reports"] if r["id"] == report_id)
+
+    text = f"""📑 Отчёт №{report['number']}
+
+📌 Бригада: {report['brigade']}
+📍 Объект: {report['well']}
+📅 Дата: {report['date']}
+
+──────────────
+"""
+
+    for op in report["operations"]:
+        text += f"""🔹 {op['date']} {op['start']}–{op['end']} | {op['name']}
+   📄 №{op['request']}
+   🚜 {op['equipment']}
+   👷 {op['rep']}
+   📦 {op['materials']}
+
+"""
+
     keyboard = [
-        [InlineKeyboardButton("📝 Создать новую заявку", callback_data='new_application')],
-        [InlineKeyboardButton("🔙 В главное меню", callback_data='back_to_main')]
+        [InlineKeyboardButton("➕ Добавить операцию", callback_data=f"add_{report_id}")],
+        [InlineKeyboardButton("🔄 Новый отчёт", callback_data="new")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "❌ Действие отменено. Выберите действие:",
-        reply_markup=reply_markup
-    )
-    
-    return ConversationHandler.END
 
-# --- Основной обработчик кнопок ---
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на кнопки"""
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == 'new_application':
-        return await new_application(update, context)
-    elif query.data == 'list_applications':
-        await list_applications(update, context)
-    elif query.data == 'help':
-        await help_command(update, context)
-    elif query.data.startswith('select_type_'):
-        return await select_type(update, context)
-    
-    return ConversationHandler.END
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений"""
-    await update.message.reply_text(
-        "Я не понял команду. Используйте /start для начала работы."
-    )
 
-# --- Основная функция ---
-def main():
-    """Запуск бота"""
-    print("=" * 50)
-    print("ЗАПУСК БОТА ДЛЯ ПРИЕМА ЗАЯВОК")
-    print("=" * 50)
-    
-    # Проверяем токен
-    token = os.environ.get("TELEGRAM_TOKEN")
-    if not token:
-        print("❌ ОШИБКА: TELEGRAM_TOKEN не найден!")
-        print("Установите переменную окружения TELEGRAM_TOKEN")
-        sys.exit(1)
-    
-    print(f"✅ Токен найден: {token[:10]}...")
-    
-    # Создаем приложение
-    application = Application.builder().token(token).build()
-    
-    # Создаем ConversationHandler
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(new_application, pattern='^new_application$')],
-        states={
-            SELECTING_TYPE: [
-                CallbackQueryHandler(select_type, pattern='^select_type_')
-            ],
-            ENTERING_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_date)],
-            ENTERING_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_time)],
-            ENTERING_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_description)],
-            ENTERING_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, enter_address)],
-            CONFIRMING: [CallbackQueryHandler(confirm_application, pattern='^(confirm_yes|confirm_no)$')],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-    
-    # Добавляем обработчики
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('cancel', cancel))
-    application.add_handler(conv_handler)
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    print("🚀 Запуск бота в режиме polling...")
-    print("📝 Нажмите Ctrl+C для остановки")
-    print("=" * 50)
-    
-    # Запускаем бота
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+async def open_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    report_id = int(q.data.split("_")[1])
+    await show_report(q.message, report_id)
 
-if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n👋 Бот остановлен пользователем")
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        sys.exit(1)
+
+async def add_operation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    report_id = int(q.data.split("_")[1])
+    context.user_data["report_id"] = report_id
+    context.user_data["state"] = "op_date"
+    await q.edit_message_text("Введите дату операции (ДД.ММ.ГГГГ):")
+
+
+# =======================
+# HANDLERS
+# =======================
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(new_report, pattern="new"))
+app.add_handler(CallbackQueryHandler(open_report, pattern="open_"))
+app.add_handler(CallbackQueryHandler(add_operation, pattern="add_"))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+
+if __name__ == "__main__":
+    app.run_polling()
