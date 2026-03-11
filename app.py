@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -10,188 +11,203 @@ from telegram.ext import (
     filters,
 )
 
-# ================= CONFIG =================
-
 TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TOKEN = TOKEN.replace("\n", "").replace("\r", "").strip()
 
-PORT = int(os.environ.get("PORT", 10000))
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-
-# =============== STATES ===================
+logging.basicConfig(level=logging.INFO)
 
 (
-    DATE,
+    BRIGADE,
+    WELL,
+    FIELD,
     SHIFT,
     NAME,
-    START_TIME,
-    END_TIME,
-    TECHNIKA,
-    REPRESENTATIVE,
-    EQUIPMENT,
+    START,
+    END,
+    TECH,
     ACTION,
 ) = range(9)
 
 TECH_LIST = [
-    "ЦА",
-    "АЦН-10",
-    "АКН",
-    "АХО",
-    "ППУ",
-    "Цементосмеситель",
-    "Автокран",
-    "Звено глушения",
-    "Звено СКБ",
-    "Тягач",
-    "Седельный тягач",
-    "АЗА",
-    "Седельный тягач с КМУ",
-    "Бортовой с КМУ",
-    "Топливозаправщик",
-    "Водовозка",
-    "АРОК",
-    "Вахтовый автобус",
-    "УАЗ",
+    "ЦА","АЦН-10","АКН","АХО","ППУ","Цементосмеситель",
+    "Автокран","Звено глушения","Звено СКБ","Тягач",
+    "Седельный тягач","АЗА","Седельный тягач с КМУ",
+    "Бортовой с КМУ","Топливозаправщик","Водовозка",
+    "АРОК","Вахтовый автобус","УАЗ"
 ]
 
-# =============== HANDLERS =================
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [["▶ Начать заполнение"]],
+    resize_keyboard=True
+)
+
+ACTION_KEYBOARD = ReplyKeyboardMarkup(
+    [["➕ Добавить операцию"], ["✅ Завершить отчёт"]],
+    resize_keyboard=True
+)
+
+SHIFT_KEYBOARD = ReplyKeyboardMarkup(
+    [["I смена", "II смена"]],
+    resize_keyboard=True
+)
+
+# ================== START ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Сетевой график ТКРС\n\nВведите дату (пример: 18.02.2026)"
+        "📊 Отчёт ТКРС\n\nНажмите начать.",
+        reply_markup=MAIN_KEYBOARD
     )
-    return DATE
+    return BRIGADE
 
 
-async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["date"] = update.message.text
+# ================== БРИГАДА ==================
 
-    keyboard = [["I смена", "II смена", "Обе смены"]]
+async def brigade(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "Начать" in update.message.text:
+        await update.message.reply_text("Введите номер бригады ТКРС:")
+        return BRIGADE
+
+    context.user_data["brigade"] = update.message.text
+    await update.message.reply_text("Введите номер скважины:")
+    return WELL
+
+
+# ================== СКВАЖИНА ==================
+
+async def well(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["well"] = update.message.text
+    await update.message.reply_text("Введите месторождение:")
+    return FIELD
+
+
+# ================== МЕСТОРОЖДЕНИЕ ==================
+
+async def field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["field"] = update.message.text
+    context.user_data["operations"] = []
     await update.message.reply_text(
-        "🔄 Выберите смену",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        "Выберите смену:",
+        reply_markup=SHIFT_KEYBOARD
     )
     return SHIFT
 
 
-async def get_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["shift"] = update.message.text
-    await update.message.reply_text("📝 Введите название операции")
+# ================== СМЕНА ==================
+
+async def shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["current_shift"] = update.message.text
+    await update.message.reply_text("Введите название операции:")
     return NAME
 
 
-async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["name"] = update.message.text
-    await update.message.reply_text("⏰ Введите время НАЧАЛА (ЧЧ:ММ)")
-    return START_TIME
+# ================== НАЗВАНИЕ ==================
+
+async def name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["current_name"] = update.message.text
+    await update.message.reply_text("Введите время начала (ЧЧ:ММ):")
+    return START
 
 
-async def get_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["start"] = update.message.text
-    await update.message.reply_text("⏰ Введите время ОКОНЧАНИЯ (ЧЧ:ММ)")
-    return END_TIME
+# ================== НАЧАЛО ==================
+
+async def start_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["current_start"] = update.message.text
+    await update.message.reply_text("Введите время окончания (ЧЧ:ММ):")
+    return END
 
 
-async def get_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["end"] = update.message.text
+# ================== ОКОНЧАНИЕ ==================
 
-    keyboard = [[t] for t in TECH_LIST]
+async def end_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    end = update.message.text
+    start = context.user_data["current_start"]
+
+    # автоопределение смены
+    try:
+        start_time_obj = datetime.strptime(start, "%H:%M").time()
+        if start_time_obj >= datetime.strptime("08:00", "%H:%M").time() and start_time_obj < datetime.strptime("20:00", "%H:%M").time():
+            auto_shift = "I смена"
+        else:
+            auto_shift = "II смена"
+    except:
+        auto_shift = context.user_data["current_shift"]
+
+    operation = {
+        "shift": auto_shift,
+        "name": context.user_data["current_name"],
+        "start": start,
+        "end": end,
+    }
+
+    context.user_data["operations"].append(operation)
+
     await update.message.reply_text(
-        "🔧 Выберите технику",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
-    )
-    return TECHNIKA
-
-
-async def get_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["tech"] = update.message.text
-    await update.message.reply_text(
-        "👤 Представитель заказчика (можно написать -)"
-    )
-    return REPRESENTATIVE
-
-
-async def get_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["rep"] = update.message.text
-    await update.message.reply_text(
-        "📦 Оборудование и материалы (можно написать -)"
-    )
-    return EQUIPMENT
-
-
-async def get_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["equip"] = update.message.text
-
-    keyboard = [["➕ Добавить ещё операцию"], ["✅ Завершить отчет"]]
-    await update.message.reply_text(
-        "✅ Операция добавлена\n\nЧто дальше?",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        f"✅ Операция добавлена ({auto_shift})",
+        reply_markup=ACTION_KEYBOARD
     )
     return ACTION
 
 
-async def action_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================== ДЕЙСТВИЕ ==================
+
+async def action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
     if "Добавить" in text:
-        await update.message.reply_text("📝 Введите название операции")
-        return NAME
+        await update.message.reply_text(
+            "Выберите смену:",
+            reply_markup=SHIFT_KEYBOARD
+        )
+        return SHIFT
 
     if "Завершить" in text:
-        data = context.user_data
+        ops = context.user_data["operations"]
 
         report = f"""
-📊 ОТЧЕТ ТКРС
+📊 ОТЧЁТ ТКРС
 
-📅 Дата: {data.get('date')}
-🔄 Смена: {data.get('shift')}
-📝 Операция: {data.get('name')}
-⏰ Начало: {data.get('start')}
-⏰ Окончание: {data.get('end')}
-🔧 Техника: {data.get('tech')}
-👤 Представитель: {data.get('rep')}
-📦 Оборудование: {data.get('equip')}
+Бригада: {context.user_data['brigade']}
+Скважина: {context.user_data['well']}
+Месторождение: {context.user_data['field']}
+
+--------------------------------------------------
 """
+
+        report += "№ | Смена | Начало | Конец | Операция\n"
+        report += "--------------------------------------------------\n"
+
+        for i, op in enumerate(ops, 1):
+            report += f"{i} | {op['shift']} | {op['start']} | {op['end']} | {op['name']}\n"
+
         await update.message.reply_text(report)
         return ConversationHandler.END
 
     return ACTION
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Отменено")
-    return ConversationHandler.END
-
-
-# =============== MAIN =================
+# ================== MAIN ==================
 
 def main():
-    application = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
 
-    conv_handler = ConversationHandler(
+    conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_date)],
-            SHIFT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_shift)],
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
-            START_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_start)],
-            END_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_end)],
-            TECHNIKA: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_tech)],
-            REPRESENTATIVE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_rep)],
-            EQUIPMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_equipment)],
-            ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, action_handler)],
+            BRIGADE: [MessageHandler(filters.TEXT & ~filters.COMMAND, brigade)],
+            WELL: [MessageHandler(filters.TEXT & ~filters.COMMAND, well)],
+            FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, field)],
+            SHIFT: [MessageHandler(filters.TEXT & ~filters.COMMAND, shift)],
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name)],
+            START: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_time)],
+            END: [MessageHandler(filters.TEXT & ~filters.COMMAND, end_time)],
+            ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, action)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[],
     )
 
-    application.add_handler(conv_handler)
-
-    print("Bot started...")
-    application.run_polling()
+    app.add_handler(conv)
+    app.run_polling()
 
 
 if __name__ == "__main__":
