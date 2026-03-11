@@ -1,225 +1,198 @@
 import os
-import json
-from datetime import datetime
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+import logging
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
+    ConversationHandler,
     ContextTypes,
     filters,
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATA_FILE = "data.json"
+# ================= CONFIG =================
 
+TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+TOKEN = TOKEN.replace("\n", "").replace("\r", "").strip()
 
-# =======================
-# ХРАНЕНИЕ
-# =======================
+PORT = int(os.environ.get("PORT", 10000))
 
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {"reports": []}
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 
+# =============== STATES ===================
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+(
+    DATE,
+    SHIFT,
+    NAME,
+    START_TIME,
+    END_TIME,
+    TECHNIKA,
+    REPRESENTATIVE,
+    EQUIPMENT,
+    ACTION,
+) = range(9)
 
+TECH_LIST = [
+    "ЦА",
+    "АЦН-10",
+    "АКН",
+    "АХО",
+    "ППУ",
+    "Цементосмеситель",
+    "Автокран",
+    "Звено глушения",
+    "Звено СКБ",
+    "Тягач",
+    "Седельный тягач",
+    "АЗА",
+    "Седельный тягач с КМУ",
+    "Бортовой с КМУ",
+    "Топливозаправщик",
+    "Водовозка",
+    "АРОК",
+    "Вахтовый автобус",
+    "УАЗ",
+]
 
-def next_number(data, brigade):
-    nums = [r["number"] for r in data["reports"] if r["brigade"] == brigade]
-    return max(nums) + 1 if nums else 1
-
-
-# =======================
-# TELEGRAM
-# =======================
-
-app = Application.builder().token(BOT_TOKEN).build()
-
+# =============== HANDLERS =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("📑 Новый отчёт", callback_data="new")]]
     await update.message.reply_text(
-        "🏗 Корпоративная система ТКРС",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        "👋 Сетевой график ТКРС\n\nВведите дату (пример: 18.02.2026)"
+    )
+    return DATE
+
+
+async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["date"] = update.message.text
+
+    keyboard = [["I смена", "II смена", "Обе смены"]]
+    await update.message.reply_text(
+        "🔄 Выберите смену",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+    )
+    return SHIFT
+
+
+async def get_shift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["shift"] = update.message.text
+    await update.message.reply_text("📝 Введите название операции")
+    return NAME
+
+
+async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["name"] = update.message.text
+    await update.message.reply_text("⏰ Введите время НАЧАЛА (ЧЧ:ММ)")
+    return START_TIME
+
+
+async def get_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["start"] = update.message.text
+    await update.message.reply_text("⏰ Введите время ОКОНЧАНИЯ (ЧЧ:ММ)")
+    return END_TIME
+
+
+async def get_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["end"] = update.message.text
+
+    keyboard = [[t] for t in TECH_LIST]
+    await update.message.reply_text(
+        "🔧 Выберите технику",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+    )
+    return TECHNIKA
+
+
+async def get_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["tech"] = update.message.text
+    await update.message.reply_text(
+        "👤 Представитель заказчика (можно написать -)"
+    )
+    return REPRESENTATIVE
+
+
+async def get_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["rep"] = update.message.text
+    await update.message.reply_text(
+        "📦 Оборудование и материалы (можно написать -)"
+    )
+    return EQUIPMENT
+
+
+async def get_equipment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["equip"] = update.message.text
+
+    keyboard = [["➕ Добавить ещё операцию"], ["✅ Завершить отчет"]]
+    await update.message.reply_text(
+        "✅ Операция добавлена\n\nЧто дальше?",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+    )
+    return ACTION
+
+
+async def action_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    if "Добавить" in text:
+        await update.message.reply_text("📝 Введите название операции")
+        return NAME
+
+    if "Завершить" in text:
+        data = context.user_data
+
+        report = f"""
+📊 ОТЧЕТ ТКРС
+
+📅 Дата: {data.get('date')}
+🔄 Смена: {data.get('shift')}
+📝 Операция: {data.get('name')}
+⏰ Начало: {data.get('start')}
+⏰ Окончание: {data.get('end')}
+🔧 Техника: {data.get('tech')}
+👤 Представитель: {data.get('rep')}
+📦 Оборудование: {data.get('equip')}
+"""
+        await update.message.reply_text(report)
+        return ConversationHandler.END
+
+    return ACTION
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Отменено")
+    return ConversationHandler.END
+
+
+# =============== MAIN =================
+
+def main():
+    application = Application.builder().token(TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_date)],
+            SHIFT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_shift)],
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
+            START_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_start)],
+            END_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_end)],
+            TECHNIKA: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_tech)],
+            REPRESENTATIVE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_rep)],
+            EQUIPMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_equipment)],
+            ACTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, action_handler)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    application.add_handler(conv_handler)
 
-# =======================
-# СОЗДАНИЕ ОТЧЁТА
-# =======================
-
-async def new_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await q.edit_message_text("Введите номер бригады:")
-    context.user_data["state"] = "brigade"
-
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    state = context.user_data.get("state")
-    data = load_data()
-
-    if state == "brigade":
-        context.user_data["brigade"] = update.message.text
-        await update.message.reply_text("Введите дату отчёта (ДД.ММ.ГГГГ):")
-        context.user_data["state"] = "date"
-
-    elif state == "date":
-        context.user_data["date"] = update.message.text
-        await update.message.reply_text("Введите скважину / месторождение:")
-        context.user_data["state"] = "well"
-
-    elif state == "well":
-        brigade = context.user_data["brigade"]
-        date = context.user_data["date"]
-        well = update.message.text
-
-        number = next_number(data, brigade)
-        report_id = len(data["reports"]) + 1
-
-        data["reports"].append({
-            "id": report_id,
-            "brigade": brigade,
-            "number": number,
-            "date": date,
-            "well": well,
-            "operations": []
-        })
-
-        save_data(data)
-        context.user_data.clear()
-
-        keyboard = [[InlineKeyboardButton("📂 Открыть отчёт", callback_data=f"open_{report_id}")]]
-        await update.message.reply_text(
-            f"✅ Отчёт №{number} создан",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    # ================= ДОБАВЛЕНИЕ ОПЕРАЦИИ =================
-
-    elif state == "op_date":
-        context.user_data["op_date"] = update.message.text
-        await update.message.reply_text("Время начала (ЧЧ:ММ):")
-        context.user_data["state"] = "op_start"
-
-    elif state == "op_start":
-        context.user_data["op_start"] = update.message.text
-        await update.message.reply_text("Время окончания (ЧЧ:ММ):")
-        context.user_data["state"] = "op_end"
-
-    elif state == "op_end":
-        context.user_data["op_end"] = update.message.text
-        await update.message.reply_text("Название операции:")
-        context.user_data["state"] = "op_name"
-
-    elif state == "op_name":
-        context.user_data["op_name"] = update.message.text
-        await update.message.reply_text("Заявка №:")
-        context.user_data["state"] = "op_req"
-
-    elif state == "op_req":
-        context.user_data["op_req"] = update.message.text
-        await update.message.reply_text("Техника:")
-        context.user_data["state"] = "op_eq"
-
-    elif state == "op_eq":
-        context.user_data["op_eq"] = update.message.text
-        await update.message.reply_text("Представитель:")
-        context.user_data["state"] = "op_rep"
-
-    elif state == "op_rep":
-        context.user_data["op_rep"] = update.message.text
-        await update.message.reply_text("Материалы:")
-        context.user_data["state"] = "op_mat"
-
-    elif state == "op_mat":
-        report_id = context.user_data["report_id"]
-
-        for r in data["reports"]:
-            if r["id"] == report_id:
-                r["operations"].append({
-                    "date": context.user_data["op_date"],
-                    "start": context.user_data["op_start"],
-                    "end": context.user_data["op_end"],
-                    "name": context.user_data["op_name"],
-                    "request": context.user_data["op_req"],
-                    "equipment": context.user_data["op_eq"],
-                    "rep": context.user_data["op_rep"],
-                    "materials": update.message.text
-                })
-
-        save_data(data)
-        context.user_data.clear()
-        await show_report(update.message, report_id)
-
-
-# =======================
-# ПОКАЗ ОТЧЁТА
-# =======================
-
-async def show_report(message, report_id):
-    data = load_data()
-    report = next(r for r in data["reports"] if r["id"] == report_id)
-
-    text = f"""📑 Отчёт №{report['number']}
-
-📌 Бригада: {report['brigade']}
-📍 Объект: {report['well']}
-📅 Дата: {report['date']}
-
-──────────────
-"""
-
-    for op in report["operations"]:
-        text += f"""🔹 {op['date']} {op['start']}–{op['end']} | {op['name']}
-   📄 №{op['request']}
-   🚜 {op['equipment']}
-   👷 {op['rep']}
-   📦 {op['materials']}
-
-"""
-
-    keyboard = [
-        [InlineKeyboardButton("➕ Добавить операцию", callback_data=f"add_{report_id}")],
-        [InlineKeyboardButton("🔄 Новый отчёт", callback_data="new")]
-    ]
-
-    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def open_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    report_id = int(q.data.split("_")[1])
-    await show_report(q.message, report_id)
-
-
-async def add_operation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    report_id = int(q.data.split("_")[1])
-    context.user_data["report_id"] = report_id
-    context.user_data["state"] = "op_date"
-    await q.edit_message_text("Введите дату операции (ДД.ММ.ГГГГ):")
-
-
-# =======================
-# HANDLERS
-# =======================
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CallbackQueryHandler(new_report, pattern="new"))
-app.add_handler(CallbackQueryHandler(open_report, pattern="open_"))
-app.add_handler(CallbackQueryHandler(add_operation, pattern="add_"))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    print("Bot started...")
+    application.run_polling()
 
 
 if __name__ == "__main__":
-    app.run_polling()
+    main()
